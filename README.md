@@ -60,6 +60,20 @@ Chain (3 hops):
   src/index.ts -> src/config/config.ts -> src/config/zod-schema.ts -> zod
 ```
 
+### Show all import chains to a package
+
+```bash
+chainsaw trace src/cli/program/config-guard.ts --why zod
+```
+
+```
+3 chains to "zod" (3 hops):
+
+  1. src/cli/program/config-guard.ts -> src/config/config.ts -> src/config/zod-schema.ts -> zod
+  2. src/cli/program/config-guard.ts -> src/config/legacy-migrate.ts -> src/config/zod-schema.ts -> zod
+  3. src/cli/program/config-guard.ts -> src/config/validation.ts -> src/config/zod-schema.ts -> zod
+```
+
 ### Compare two entry points
 
 ```bash
@@ -101,6 +115,7 @@ Options:
       --include-dynamic  Also traverse dynamic imports
       --top <TOP>        Show top N heaviest dependencies [default: 10]
       --chain <CHAIN>    Show the full shortest chain to a specific package
+      --why <WHY>        Show ALL shortest import chains to a specific package
       --json             Output machine-readable JSON
       --no-cache         Force full re-parse
   -h, --help             Print help
