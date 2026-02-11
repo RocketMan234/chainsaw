@@ -328,3 +328,174 @@ fn walk_expr(expr: &Expr, imports: &mut Vec<RawImport>) {
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse TypeScript source and extract imports without touching the filesystem.
+    fn parse_ts(source: &str) -> Vec<RawImport> {
+        let cm = Arc::<SourceMap>::default();
+        let fm = cm.new_source_file(
+            swc_common::FileName::Custom("test.ts".into()).into(),
+            source.to_string(),
+        );
+        let syntax = Syntax::Typescript(TsSyntax {
+            tsx: false,
+            decorators: true,
+            ..Default::default()
+        });
+        let mut errors = vec![];
+        let module = parse_file_as_module(&fm, syntax, EsVersion::EsNext, None, &mut errors)
+            .expect("test source should parse");
+        extract_imports(&module)
+    }
+
+    // --- Static imports ---
+
+    #[test]
+    fn static_named_import() {
+        let imports = parse_ts(r#"import { foo } from "bar";"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::Static);
+    }
+
+    #[test]
+    fn static_default_import() {
+        let imports = parse_ts(r#"import foo from "bar";"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::Static);
+    }
+
+    #[test]
+    fn static_reexport_named() {
+        let imports = parse_ts(r#"export { foo } from "bar";"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::Static);
+    }
+
+    #[test]
+    fn static_reexport_star() {
+        let imports = parse_ts(r#"export * from "bar";"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::Static);
+    }
+
+    #[test]
+    fn static_require() {
+        let imports = parse_ts(r#"const x = require("bar");"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::Static);
+    }
+
+    // --- Type-only imports ---
+
+    #[test]
+    fn type_only_import() {
+        let imports = parse_ts(r#"import type { Foo } from "bar";"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::TypeOnly);
+    }
+
+    #[test]
+    fn type_only_all_specifiers() {
+        let imports = parse_ts(r#"import { type Foo, type Bar } from "baz";"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "baz");
+        assert_eq!(imports[0].kind, EdgeKind::TypeOnly);
+    }
+
+    #[test]
+    fn mixed_type_and_value_specifiers() {
+        let imports = parse_ts(r#"import { type Foo, bar } from "baz";"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "baz");
+        assert_eq!(imports[0].kind, EdgeKind::Static);
+    }
+
+    #[test]
+    fn type_only_reexport() {
+        let imports = parse_ts(r#"export type { Foo } from "bar";"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::TypeOnly);
+    }
+
+    // --- Dynamic imports ---
+
+    #[test]
+    fn dynamic_await_import() {
+        let imports = parse_ts(r#"const m = await import("bar");"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::Dynamic);
+    }
+
+    #[test]
+    fn dynamic_import_expression_position() {
+        // Bug #8: import().then() was missed because Expr::Member wasn't walked
+        let imports = parse_ts(r#"import("./run-main.js").then(({ run }) => run());"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "./run-main.js");
+        assert_eq!(imports[0].kind, EdgeKind::Dynamic);
+    }
+
+    #[test]
+    fn dynamic_import_in_arrow() {
+        let imports = parse_ts(r#"const load = () => import("bar");"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::Dynamic);
+    }
+
+    #[test]
+    fn require_in_if_block() {
+        let imports = parse_ts(r#"if (cond) { const x = require("bar"); }"#);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::Static);
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn dynamic_import_in_try_catch() {
+        let imports = parse_ts(
+            r#"try { await import("bar"); } catch (e) { console.error(e); }"#,
+        );
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].specifier, "bar");
+        assert_eq!(imports[0].kind, EdgeKind::Dynamic);
+    }
+
+    #[test]
+    fn multiple_imports_all_kinds() {
+        let imports = parse_ts(
+            r#"
+            import { a } from "static-dep";
+            import type { B } from "type-dep";
+            const c = await import("dynamic-dep");
+            const d = require("require-dep");
+            "#,
+        );
+        assert_eq!(imports.len(), 4);
+
+        assert_eq!(imports[0].specifier, "static-dep");
+        assert_eq!(imports[0].kind, EdgeKind::Static);
+
+        assert_eq!(imports[1].specifier, "type-dep");
+        assert_eq!(imports[1].kind, EdgeKind::TypeOnly);
+
+        assert_eq!(imports[2].specifier, "dynamic-dep");
+        assert_eq!(imports[2].kind, EdgeKind::Dynamic);
+
+        assert_eq!(imports[3].specifier, "require-dep");
+        assert_eq!(imports[3].kind, EdgeKind::Static);
+    }
+}
