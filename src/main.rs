@@ -137,6 +137,33 @@ fn main() {
                 }
             };
 
+            // Validate mutually exclusive flags
+            if chain.is_some() && cut.is_some() {
+                eprintln!("error: --chain and --cut cannot be used together");
+                std::process::exit(1);
+            }
+            if diff.is_some() && diff_from.is_some() {
+                eprintln!("error: --diff and --diff-from cannot be used together");
+                std::process::exit(1);
+            }
+
+            let opts = query::TraceOptions {
+                include_dynamic,
+                top_n: top,
+            };
+            let result = query::trace(&graph, entry_id, &opts);
+
+            // Save snapshot if requested (works with any mode)
+            if let Some(ref save_path) = save {
+                let snapshot = result.to_snapshot();
+                let data = serde_json::to_string_pretty(&snapshot).unwrap();
+                std::fs::write(save_path, data).unwrap_or_else(|e| {
+                    eprintln!("error: cannot write snapshot '{}': {e}", save_path.display());
+                    std::process::exit(1);
+                });
+                eprintln!("Snapshot saved to {}", save_path.display());
+            }
+
             // Handle --chain mode
             if let Some(ref package_name) = chain {
                 let package_exists = graph.package_map.contains_key(package_name.as_str());
@@ -161,19 +188,6 @@ fn main() {
                 }
                 return;
             }
-
-            let opts = query::TraceOptions {
-                include_dynamic,
-                top_n: top,
-            };
-
-            // Validate mutually exclusive flags
-            if diff.is_some() && diff_from.is_some() {
-                eprintln!("error: --diff and --diff-from cannot be used together");
-                std::process::exit(1);
-            }
-
-            let result = query::trace(&graph, entry_id, &opts);
 
             // Handle --diff-from mode (compare against saved snapshot)
             if let Some(ref snapshot_path) = diff_from {
@@ -244,17 +258,6 @@ fn main() {
                 report::print_trace_json(&graph, &result, &entry, &root);
             } else {
                 report::print_trace(&graph, &result, &entry, &root);
-            }
-
-            // Save snapshot if requested
-            if let Some(ref save_path) = save {
-                let snapshot = result.to_snapshot();
-                let data = serde_json::to_string_pretty(&snapshot).unwrap();
-                std::fs::write(save_path, data).unwrap_or_else(|e| {
-                    eprintln!("error: cannot write snapshot '{}': {e}", save_path.display());
-                    std::process::exit(1);
-                });
-                eprintln!("Snapshot saved to {}", save_path.display());
             }
 
             let elapsed = start.elapsed();
