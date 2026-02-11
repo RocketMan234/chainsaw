@@ -86,28 +86,6 @@ pub fn print_trace(graph: &ModuleGraph, result: &TraceResult, entry_path: &Path,
     }
 }
 
-pub fn print_chain(graph: &ModuleGraph, chain: &[crate::graph::ModuleId], root: &Path) {
-    if chain.is_empty() {
-        println!("No chain found.");
-        return;
-    }
-    println!("Chain ({} hops):", chain.len() - 1);
-    for (i, &mid) in chain.iter().enumerate() {
-        let m = graph.module(mid);
-        let display = if let Some(ref pkg) = m.package {
-            pkg.clone()
-        } else {
-            relative_path(&m.path, root)
-        };
-        if i == 0 {
-            print!("  {display}");
-        } else {
-            print!(" -> {display}");
-        }
-    }
-    println!();
-}
-
 pub fn print_diff(diff: &DiffResult, entry_a: &str, entry_b: &str) {
     println!("Diff: {entry_a} vs {entry_b}");
     println!();
@@ -149,7 +127,7 @@ pub fn print_diff(diff: &DiffResult, entry_a: &str, entry_b: &str) {
     }
 }
 
-pub fn print_why(
+pub fn print_chains(
     graph: &ModuleGraph,
     chains: &[Vec<crate::graph::ModuleId>],
     package_name: &str,
@@ -189,7 +167,7 @@ pub fn print_why(
     }
 }
 
-pub fn print_why_json(
+pub fn print_chains_json(
     graph: &ModuleGraph,
     chains: &[Vec<crate::graph::ModuleId>],
     package_name: &str,
@@ -197,7 +175,7 @@ pub fn print_why_json(
     package_exists: bool,
 ) {
     if chains.is_empty() {
-        let json = JsonWhyEmpty {
+        let json = JsonChainsEmpty {
             package: package_name.to_string(),
             found_in_graph: package_exists,
             chain_count: 0,
@@ -206,7 +184,7 @@ pub fn print_why_json(
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
         return;
     }
-    let json = JsonWhy {
+    let json = JsonChains {
         package: package_name.to_string(),
         chain_count: chains.len(),
         hop_count: chains.first().map(|c| c.len().saturating_sub(1)).unwrap_or(0),
@@ -233,7 +211,7 @@ pub fn print_why_json(
 // JSON output types
 
 #[derive(Serialize)]
-struct JsonWhy {
+struct JsonChains {
     package: String,
     chain_count: usize,
     hop_count: usize,
@@ -241,7 +219,7 @@ struct JsonWhy {
 }
 
 #[derive(Serialize)]
-struct JsonWhyEmpty {
+struct JsonChainsEmpty {
     package: String,
     found_in_graph: bool,
     chain_count: usize,

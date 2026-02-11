@@ -219,11 +219,6 @@ pub fn trace(graph: &ModuleGraph, entry: ModuleId, opts: &TraceOptions) -> Trace
     }
 }
 
-/// Find the shortest chain from entry to a specific package.
-pub fn find_chain(graph: &ModuleGraph, entry: ModuleId, package_name: &str) -> Vec<ModuleId> {
-    shortest_chain_to_package(graph, entry, package_name)
-}
-
 /// Find ALL shortest chains from entry to a specific package.
 /// Returns up to `max_chains` distinct shortest paths (all same hop count),
 /// deduplicated at the package-name level so chains that differ only by

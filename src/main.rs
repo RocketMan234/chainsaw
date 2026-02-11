@@ -41,13 +41,9 @@ enum Commands {
         #[arg(long, default_value_t = 10)]
         top: usize,
 
-        /// Show the full shortest chain to a specific package
+        /// Show all shortest import chains to a specific package
         #[arg(long)]
         chain: Option<String>,
-
-        /// Show ALL shortest import chains to a specific package
-        #[arg(long)]
-        why: Option<String>,
 
         /// Output machine-readable JSON
         #[arg(long)]
@@ -69,7 +65,6 @@ fn main() {
             include_dynamic,
             top,
             chain,
-            why,
             json,
             no_cache,
             ..
@@ -127,22 +122,15 @@ fn main() {
                 }
             };
 
-            // Handle --why mode
-            if let Some(ref package_name) = why {
+            // Handle --chain mode
+            if let Some(ref package_name) = chain {
                 let package_exists = graph.package_map.contains_key(package_name.as_str());
                 let chains = query::find_all_chains(&graph, entry_id, package_name);
                 if json {
-                    report::print_why_json(&graph, &chains, package_name, &root, package_exists);
+                    report::print_chains_json(&graph, &chains, package_name, &root, package_exists);
                 } else {
-                    report::print_why(&graph, &chains, package_name, &root, package_exists);
+                    report::print_chains(&graph, &chains, package_name, &root, package_exists);
                 }
-                return;
-            }
-
-            // Handle --chain mode
-            if let Some(ref package_name) = chain {
-                let chain_result = query::find_chain(&graph, entry_id, package_name);
-                report::print_chain(&graph, &chain_result, &root);
                 return;
             }
 
