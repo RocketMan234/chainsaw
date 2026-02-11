@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -59,6 +59,59 @@ fn parse_files_parallel(files: &[PathBuf]) -> Vec<(PathBuf, Vec<RawImport>)> {
         .collect()
 }
 
+/// Read the "name" field from a package.json file.
+fn read_package_name(pkg_json: &Path) -> Option<String> {
+    let content = fs::read_to_string(pkg_json).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    parsed.get("name")?.as_str().map(|s| s.to_string())
+}
+
+/// Cache for workspace package name lookups.
+/// For resolved paths outside node_modules, walks up to find package.json
+/// and uses its "name" field as the package name.
+struct WorkspacePackageCache {
+    project_root: PathBuf,
+    cache: HashMap<PathBuf, Option<String>>,
+}
+
+impl WorkspacePackageCache {
+    fn new(project_root: &Path) -> Self {
+        Self {
+            project_root: project_root.to_path_buf(),
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Try to find a workspace package name for the given file path.
+    /// Returns None for files within the project root or without a package.json ancestor.
+    fn lookup(&mut self, file_path: &Path) -> Option<String> {
+        let mut dir = file_path.parent()?;
+        loop {
+            if let Some(cached) = self.cache.get(dir) {
+                return cached.clone();
+            }
+
+            let pkg_json = dir.join("package.json");
+            if pkg_json.exists() {
+                let result = if dir == self.project_root {
+                    // Project root itself — not a workspace dep
+                    None
+                } else {
+                    read_package_name(&pkg_json)
+                };
+                self.cache.insert(dir.to_path_buf(), result.clone());
+                return result;
+            }
+
+            match dir.parent() {
+                Some(parent) if parent != dir => dir = parent,
+                _ => break,
+            }
+        }
+        None
+    }
+}
+
 /// Build a complete ModuleGraph starting from the given root directory.
 /// Walks source files, parses them, resolves imports (following into node_modules),
 /// and builds the graph iteratively.
@@ -80,6 +133,7 @@ pub fn build_graph(root: &Path) -> ModuleGraph {
     // Use a work queue for files that need their imports resolved
     let mut pending_resolutions: VecDeque<(PathBuf, Vec<RawImport>)> =
         parsed.into_iter().collect();
+    let mut workspace_cache = WorkspacePackageCache::new(root);
 
     while let Some((source_path, imports)) = pending_resolutions.pop_front() {
         let source_dir = source_path.parent().unwrap_or(Path::new("."));
@@ -93,7 +147,8 @@ pub fn build_graph(root: &Path) -> ModuleGraph {
                 None => continue,
             };
 
-            let package = package_name_from_path(&resolved);
+            let package = package_name_from_path(&resolved)
+                .or_else(|| workspace_cache.lookup(&resolved));
             let size = fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0);
 
             let mut g = graph.lock().unwrap();
