@@ -54,7 +54,16 @@ pub fn is_node_builtin(specifier: &str) -> bool {
     NODE_BUILTINS.contains(&specifier)
 }
 
-pub fn create_resolver() -> Resolver {
+pub fn create_resolver(root: &Path) -> Resolver {
+    let mut modules = vec!["node_modules".into()];
+
+    // pnpm strict mode (v10+) stores packages in node_modules/.pnpm/node_modules/
+    // instead of hoisting them to the top-level node_modules/
+    let pnpm_virtual = root.join("node_modules/.pnpm/node_modules");
+    if pnpm_virtual.is_dir() {
+        modules.push(pnpm_virtual.to_string_lossy().into_owned());
+    }
+
     Resolver::new(ResolveOptions {
         extensions: vec![
             ".ts".into(),
@@ -77,6 +86,7 @@ pub fn create_resolver() -> Resolver {
         ],
         condition_names: vec!["node".into(), "import".into(), "require".into(), "default".into()],
         main_fields: vec!["module".into(), "main".into()],
+        modules,
         ..ResolveOptions::default()
     })
 }

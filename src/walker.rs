@@ -64,7 +64,7 @@ fn parse_files_parallel(files: &[PathBuf]) -> Vec<(PathBuf, Vec<RawImport>)> {
 /// and builds the graph iteratively.
 pub fn build_graph(root: &Path) -> ModuleGraph {
     let graph = Mutex::new(ModuleGraph::new());
-    let resolver = resolver::create_resolver();
+    let resolver = resolver::create_resolver(root);
 
     // Phase 1: Discover and parse source files
     let source_files = discover_source_files(root);
