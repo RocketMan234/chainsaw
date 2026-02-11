@@ -435,6 +435,17 @@ pub fn find_cut_modules(
             .unwrap_or(usize::MAX)
     });
 
+    // Deduplicate at package level -- multiple files within the same
+    // node_modules package are the same cut point from the user's perspective
+    let mut seen_packages: HashSet<String> = HashSet::new();
+    cuts.retain(|c| {
+        let m = graph.module(c.module_id);
+        match m.package {
+            Some(ref pkg) => seen_packages.insert(pkg.clone()),
+            None => true, // source files are always unique
+        }
+    });
+
     cuts
 }
 
