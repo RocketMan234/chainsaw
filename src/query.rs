@@ -391,16 +391,19 @@ fn all_shortest_chains_to_package(
 pub struct CutModule {
     pub module_id: ModuleId,
     pub chains_broken: usize,
+    pub transitive_size: u64,
 }
 
 /// Find modules that appear in all chains from entry to a package.
 /// Removing any one of these severs every import path to the target.
-/// Sorted by position in the first chain (entry-nearest first).
+/// Sorted by transitive weight descending (highest-impact first),
+/// truncated to `top_n`.
 pub fn find_cut_modules(
     graph: &ModuleGraph,
     chains: &[Vec<ModuleId>],
     entry: ModuleId,
     target_package: &str,
+    top_n: usize,
 ) -> Vec<CutModule> {
     if chains.is_empty() {
         return Vec::new();
@@ -424,28 +427,24 @@ pub fn find_cut_modules(
         .map(|(mid, count)| CutModule {
             module_id: mid,
             chains_broken: count,
+            transitive_size: transitive_cost(graph, mid),
         })
         .collect();
 
-    // Sort by position in first chain (entry-nearest first)
-    cuts.sort_by_key(|c| {
-        chains[0]
-            .iter()
-            .position(|&m| m == c.module_id)
-            .unwrap_or(usize::MAX)
-    });
-
     // Deduplicate at package level -- multiple files within the same
-    // node_modules package are the same cut point from the user's perspective
+    // node_modules package are the same cut point from the user's perspective.
+    // Keep the one with the highest transitive size.
+    cuts.sort_by(|a, b| b.transitive_size.cmp(&a.transitive_size));
     let mut seen_packages: HashSet<String> = HashSet::new();
     cuts.retain(|c| {
         let m = graph.module(c.module_id);
         match m.package {
             Some(ref pkg) => seen_packages.insert(pkg.clone()),
-            None => true, // source files are always unique
+            None => true,
         }
     });
 
+    cuts.truncate(top_n);
     cuts
 }
 

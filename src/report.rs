@@ -251,8 +251,9 @@ pub fn print_cut(
             relative_path(&m.path, root)
         };
         println!(
-            "  {:<55} (breaks {}/{} chains)",
+            "  {:<45} {:>8}  (breaks {}/{} chains)",
             display,
+            format_size(cut.transitive_size),
             cut.chains_broken,
             chains.len()
         );
@@ -292,6 +293,7 @@ pub fn print_cut_json(
                 };
                 JsonCutPoint {
                     module: display,
+                    transitive_size_bytes: c.transitive_size,
                     chains_broken: c.chains_broken,
                 }
             })
@@ -312,6 +314,7 @@ struct JsonCut {
 #[derive(Serialize)]
 struct JsonCutPoint {
     module: String,
+    transitive_size_bytes: u64,
     chains_broken: usize,
 }
 
