@@ -300,6 +300,7 @@ fn walk_expr(expr: &Expr, imports: &mut Vec<RawImport>) {
             walk_expr(&bin.right, imports);
         }
         Expr::Unary(unary) => walk_expr(&unary.arg, imports),
+        Expr::Member(member) => walk_expr(&member.obj, imports),
         Expr::Array(array) => {
             for elem in array.elems.iter().flatten() {
                 walk_expr(&elem.expr, imports);
