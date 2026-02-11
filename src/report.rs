@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::graph::ModuleGraph;
-use crate::query::{DiffResult, TraceResult};
+use crate::query::{CutModule, DiffResult, TraceResult};
 
 fn format_size(bytes: u64) -> String {
     if bytes >= 1_000_000 {
@@ -208,7 +208,112 @@ pub fn print_chains_json(
     println!("{}", serde_json::to_string_pretty(&json).unwrap());
 }
 
+pub fn print_cut(
+    graph: &ModuleGraph,
+    cuts: &[CutModule],
+    chains: &[Vec<crate::graph::ModuleId>],
+    package_name: &str,
+    root: &Path,
+    package_exists: bool,
+) {
+    if chains.is_empty() {
+        if package_exists {
+            println!("Package \"{package_name}\" exists in the graph but is not reachable from this entry point.");
+        } else {
+            println!("Package \"{package_name}\" is not in the dependency graph. Check the spelling or verify it's installed.");
+        }
+        return;
+    }
+
+    if cuts.is_empty() {
+        println!(
+            "No single cut point can sever all {} chain{} to \"{package_name}\".",
+            chains.len(),
+            if chains.len() == 1 { "" } else { "s" },
+        );
+        println!("Each chain takes a different path — multiple fixes needed.");
+        return;
+    }
+
+    println!(
+        "{} cut point{} to sever all {} chain{} to \"{}\":\n",
+        cuts.len(),
+        if cuts.len() == 1 { "" } else { "s" },
+        chains.len(),
+        if chains.len() == 1 { "" } else { "s" },
+        package_name,
+    );
+    for cut in cuts {
+        let m = graph.module(cut.module_id);
+        let display = if let Some(ref pkg) = m.package {
+            pkg.clone()
+        } else {
+            relative_path(&m.path, root)
+        };
+        println!(
+            "  {:<55} (breaks {}/{} chains)",
+            display,
+            cut.chains_broken,
+            chains.len()
+        );
+    }
+}
+
+pub fn print_cut_json(
+    graph: &ModuleGraph,
+    cuts: &[CutModule],
+    chains: &[Vec<crate::graph::ModuleId>],
+    package_name: &str,
+    root: &Path,
+    package_exists: bool,
+) {
+    if chains.is_empty() {
+        let json = JsonChainsEmpty {
+            package: package_name.to_string(),
+            found_in_graph: package_exists,
+            chain_count: 0,
+            chains: Vec::new(),
+        };
+        println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        return;
+    }
+
+    let json = JsonCut {
+        package: package_name.to_string(),
+        chain_count: chains.len(),
+        cut_points: cuts
+            .iter()
+            .map(|c| {
+                let m = graph.module(c.module_id);
+                let display = if let Some(ref pkg) = m.package {
+                    pkg.clone()
+                } else {
+                    relative_path(&m.path, root)
+                };
+                JsonCutPoint {
+                    module: display,
+                    chains_broken: c.chains_broken,
+                }
+            })
+            .collect(),
+    };
+    println!("{}", serde_json::to_string_pretty(&json).unwrap());
+}
+
 // JSON output types
+
+#[derive(Serialize)]
+struct JsonCut {
+    package: String,
+    chain_count: usize,
+    cut_points: Vec<JsonCutPoint>,
+}
+
+#[derive(Serialize)]
+struct JsonCutPoint {
+    module: String,
+    chains_broken: usize,
+}
 
 #[derive(Serialize)]
 struct JsonChains {

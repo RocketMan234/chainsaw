@@ -376,6 +376,56 @@ fn all_shortest_chains_to_package(
     all_chains
 }
 
+pub struct CutModule {
+    pub module_id: ModuleId,
+    pub chains_broken: usize,
+}
+
+/// Find modules that appear in all chains from entry to a package.
+/// Removing any one of these severs every import path to the target.
+/// Sorted by position in the first chain (entry-nearest first).
+pub fn find_cut_modules(
+    graph: &ModuleGraph,
+    chains: &[Vec<ModuleId>],
+    entry: ModuleId,
+    target_package: &str,
+) -> Vec<CutModule> {
+    if chains.is_empty() {
+        return Vec::new();
+    }
+
+    let total = chains.len();
+    let mut frequency: HashMap<ModuleId, usize> = HashMap::new();
+    for chain in chains {
+        for &mid in chain {
+            *frequency.entry(mid).or_insert(0) += 1;
+        }
+    }
+
+    let mut cuts: Vec<CutModule> = frequency
+        .into_iter()
+        .filter(|&(mid, count)| {
+            count == total
+                && mid != entry
+                && graph.module(mid).package.as_deref() != Some(target_package)
+        })
+        .map(|(mid, count)| CutModule {
+            module_id: mid,
+            chains_broken: count,
+        })
+        .collect();
+
+    // Sort by position in first chain (entry-nearest first)
+    cuts.sort_by_key(|c| {
+        chains[0]
+            .iter()
+            .position(|&m| m == c.module_id)
+            .unwrap_or(usize::MAX)
+    });
+
+    cuts
+}
+
 /// Compute a diff between two trace results.
 pub struct DiffResult {
     pub entry_a_weight: u64,

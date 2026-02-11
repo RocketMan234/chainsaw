@@ -45,6 +45,10 @@ enum Commands {
         #[arg(long)]
         chain: Option<String>,
 
+        /// Show where to cut to sever all import chains to a package
+        #[arg(long)]
+        cut: Option<String>,
+
         /// Output machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -65,6 +69,7 @@ fn main() {
             include_dynamic,
             top,
             chain,
+            cut,
             json,
             no_cache,
             ..
@@ -130,6 +135,19 @@ fn main() {
                     report::print_chains_json(&graph, &chains, package_name, &root, package_exists);
                 } else {
                     report::print_chains(&graph, &chains, package_name, &root, package_exists);
+                }
+                return;
+            }
+
+            // Handle --cut mode
+            if let Some(ref package_name) = cut {
+                let package_exists = graph.package_map.contains_key(package_name.as_str());
+                let chains = query::find_all_chains(&graph, entry_id, package_name);
+                let cuts = query::find_cut_modules(&graph, &chains, entry_id, package_name);
+                if json {
+                    report::print_cut_json(&graph, &cuts, &chains, package_name, &root, package_exists);
+                } else {
+                    report::print_cut(&graph, &cuts, &chains, package_name, &root, package_exists);
                 }
                 return;
             }
