@@ -1,3 +1,6 @@
+mod graph;
+mod parser;
+
 fn main() {
-    println!("Hello, world!");
+    println!("chainsaw - TypeScript dependency graph analyzer");
 }

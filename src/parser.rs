@@ -1,0 +1,329 @@
+use std::path::Path;
+use std::sync::Arc;
+use swc_common::SourceMap;
+use swc_ecma_ast::{
+    Callee, EsVersion, Expr, ExportSpecifier, ImportSpecifier, Lit, Module, ModuleDecl,
+    ModuleItem, Stmt,
+};
+use swc_ecma_parser::{parse_file_as_module, EsSyntax, Syntax, TsSyntax};
+
+use crate::graph::EdgeKind;
+
+/// Convert a WTF-8 atom (from SWC's Str.value) to a String.
+/// Import specifiers are always valid UTF-8, so lossy conversion is safe.
+fn wtf8_to_string(atom: &swc_ecma_ast::Str) -> String {
+    atom.value.to_string_lossy().into_owned()
+}
+
+#[derive(Debug, Clone)]
+pub struct RawImport {
+    pub specifier: String,
+    pub kind: EdgeKind,
+}
+
+fn syntax_for_path(path: &Path) -> Syntax {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("ts") => Syntax::Typescript(TsSyntax {
+            tsx: false,
+            decorators: true,
+            ..Default::default()
+        }),
+        Some("tsx") => Syntax::Typescript(TsSyntax {
+            tsx: true,
+            decorators: true,
+            ..Default::default()
+        }),
+        Some("jsx") => Syntax::Es(EsSyntax {
+            jsx: true,
+            ..Default::default()
+        }),
+        // .js, .mjs, .cjs, and anything else: parse as JS
+        _ => Syntax::Es(EsSyntax {
+            jsx: false,
+            ..Default::default()
+        }),
+    }
+}
+
+pub fn parse_file(path: &Path) -> Result<Vec<RawImport>, String> {
+    let cm = Arc::<SourceMap>::default();
+    let fm = cm
+        .load_file(path)
+        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+
+    let syntax = syntax_for_path(path);
+    let mut errors = vec![];
+
+    let module = parse_file_as_module(&fm, syntax, EsVersion::EsNext, None, &mut errors)
+        .map_err(|e| format!("Parse error in {}: {e:?}", path.display()))?;
+
+    Ok(extract_imports(&module))
+}
+
+fn extract_imports(module: &Module) -> Vec<RawImport> {
+    let mut imports = Vec::new();
+
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(decl) => extract_from_decl(decl, &mut imports),
+            ModuleItem::Stmt(stmt) => extract_from_stmt(stmt, &mut imports),
+        }
+    }
+
+    imports
+}
+
+fn extract_from_decl(decl: &ModuleDecl, imports: &mut Vec<RawImport>) {
+    match decl {
+        // import { x } from "y"  /  import type { x } from "y"
+        ModuleDecl::Import(import_decl) => {
+            let kind = if import_decl.type_only {
+                EdgeKind::TypeOnly
+            } else {
+                // Check if ALL specifiers are type-only
+                let all_type = !import_decl.specifiers.is_empty()
+                    && import_decl.specifiers.iter().all(|s| match s {
+                        ImportSpecifier::Named(n) => n.is_type_only,
+                        _ => false,
+                    });
+                if all_type {
+                    EdgeKind::TypeOnly
+                } else {
+                    EdgeKind::Static
+                }
+            };
+            imports.push(RawImport {
+                specifier: wtf8_to_string(&import_decl.src),
+                kind,
+            });
+        }
+
+        // export * from "y"  /  export type * from "y"
+        ModuleDecl::ExportAll(export_all) => {
+            let kind = if export_all.type_only {
+                EdgeKind::TypeOnly
+            } else {
+                EdgeKind::Static
+            };
+            imports.push(RawImport {
+                specifier: wtf8_to_string(&export_all.src),
+                kind,
+            });
+        }
+
+        // export { x } from "y"  /  export type { x } from "y"
+        ModuleDecl::ExportNamed(named) => {
+            if let Some(src) = &named.src {
+                let kind = if named.type_only {
+                    EdgeKind::TypeOnly
+                } else {
+                    let all_type = !named.specifiers.is_empty()
+                        && named.specifiers.iter().all(|s| matches!(
+                            s,
+                            ExportSpecifier::Named(n) if n.is_type_only
+                        ));
+                    if all_type {
+                        EdgeKind::TypeOnly
+                    } else {
+                        EdgeKind::Static
+                    }
+                };
+                imports.push(RawImport {
+                    specifier: wtf8_to_string(src),
+                    kind,
+                });
+            }
+        }
+
+        _ => {}
+    }
+}
+
+fn extract_from_stmt(stmt: &Stmt, imports: &mut Vec<RawImport>) {
+    walk_stmt(stmt, imports);
+}
+
+/// Recursively walk statements to find require() and import() calls.
+fn walk_stmt(stmt: &Stmt, imports: &mut Vec<RawImport>) {
+    match stmt {
+        Stmt::Expr(expr_stmt) => walk_expr(&expr_stmt.expr, imports),
+        Stmt::Decl(decl) => walk_decl(decl, imports),
+        Stmt::Block(block) => {
+            for s in &block.stmts {
+                walk_stmt(s, imports);
+            }
+        }
+        Stmt::If(if_stmt) => {
+            walk_stmt(&if_stmt.cons, imports);
+            if let Some(alt) = &if_stmt.alt {
+                walk_stmt(alt, imports);
+            }
+        }
+        Stmt::Switch(switch) => {
+            walk_expr(&switch.discriminant, imports);
+            for case in &switch.cases {
+                for s in &case.cons {
+                    walk_stmt(s, imports);
+                }
+            }
+        }
+        Stmt::Try(try_stmt) => {
+            for s in &try_stmt.block.stmts {
+                walk_stmt(s, imports);
+            }
+            if let Some(catch) = &try_stmt.handler {
+                for s in &catch.body.stmts {
+                    walk_stmt(s, imports);
+                }
+            }
+            if let Some(finalizer) = &try_stmt.finalizer {
+                for s in &finalizer.stmts {
+                    walk_stmt(s, imports);
+                }
+            }
+        }
+        Stmt::While(while_stmt) => {
+            walk_stmt(&while_stmt.body, imports);
+        }
+        Stmt::DoWhile(do_while) => {
+            walk_stmt(&do_while.body, imports);
+        }
+        Stmt::For(for_stmt) => {
+            walk_stmt(&for_stmt.body, imports);
+        }
+        Stmt::ForIn(for_in) => {
+            walk_stmt(&for_in.body, imports);
+        }
+        Stmt::ForOf(for_of) => {
+            walk_stmt(&for_of.body, imports);
+        }
+        Stmt::Return(ret) => {
+            if let Some(arg) = &ret.arg {
+                walk_expr(arg, imports);
+            }
+        }
+        Stmt::Labeled(labeled) => {
+            walk_stmt(&labeled.body, imports);
+        }
+        _ => {}
+    }
+}
+
+fn walk_decl(decl: &swc_ecma_ast::Decl, imports: &mut Vec<RawImport>) {
+    match decl {
+        swc_ecma_ast::Decl::Var(var_decl) => {
+            for decl in &var_decl.decls {
+                if let Some(init) = &decl.init {
+                    walk_expr(init, imports);
+                }
+            }
+        }
+        swc_ecma_ast::Decl::Fn(fn_decl) => {
+            if let Some(body) = &fn_decl.function.body {
+                for s in &body.stmts {
+                    walk_stmt(s, imports);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_expr(expr: &Expr, imports: &mut Vec<RawImport>) {
+    match expr {
+        Expr::Call(call) => {
+            // Dynamic import()
+            if let Callee::Import(_) = &call.callee {
+                if let Some(arg) = call.args.first() {
+                    if let Expr::Lit(Lit::Str(s)) = &*arg.expr {
+                        imports.push(RawImport {
+                            specifier: wtf8_to_string(s),
+                            kind: EdgeKind::Dynamic,
+                        });
+                    }
+                }
+                return;
+            }
+            // require("...")
+            if let Callee::Expr(callee_expr) = &call.callee {
+                if let Expr::Ident(ident) = &**callee_expr {
+                    if ident.sym.as_str() == "require" {
+                        if let Some(arg) = call.args.first() {
+                            if let Expr::Lit(Lit::Str(s)) = &*arg.expr {
+                                imports.push(RawImport {
+                                    specifier: wtf8_to_string(s),
+                                    kind: EdgeKind::Static,
+                                });
+                            }
+                        }
+                        return;
+                    }
+                }
+                walk_expr(callee_expr, imports);
+            }
+            for arg in &call.args {
+                walk_expr(&arg.expr, imports);
+            }
+        }
+        Expr::Arrow(arrow) => match &*arrow.body {
+            swc_ecma_ast::BlockStmtOrExpr::BlockStmt(block) => {
+                for s in &block.stmts {
+                    walk_stmt(s, imports);
+                }
+            }
+            swc_ecma_ast::BlockStmtOrExpr::Expr(e) => walk_expr(e, imports),
+        },
+        Expr::Fn(fn_expr) => {
+            if let Some(body) = &fn_expr.function.body {
+                for s in &body.stmts {
+                    walk_stmt(s, imports);
+                }
+            }
+        }
+        Expr::Assign(assign) => {
+            walk_expr(&assign.right, imports);
+        }
+        Expr::Seq(seq) => {
+            for e in &seq.exprs {
+                walk_expr(e, imports);
+            }
+        }
+        Expr::Paren(paren) => walk_expr(&paren.expr, imports),
+        Expr::Await(await_expr) => walk_expr(&await_expr.arg, imports),
+        Expr::Cond(cond) => {
+            walk_expr(&cond.test, imports);
+            walk_expr(&cond.cons, imports);
+            walk_expr(&cond.alt, imports);
+        }
+        Expr::Bin(bin) => {
+            walk_expr(&bin.left, imports);
+            walk_expr(&bin.right, imports);
+        }
+        Expr::Unary(unary) => walk_expr(&unary.arg, imports),
+        Expr::Array(array) => {
+            for elem in array.elems.iter().flatten() {
+                walk_expr(&elem.expr, imports);
+            }
+        }
+        Expr::Object(object) => {
+            for prop in &object.props {
+                match prop {
+                    swc_ecma_ast::PropOrSpread::Prop(p) => {
+                        if let swc_ecma_ast::Prop::KeyValue(kv) = &**p {
+                            walk_expr(&kv.value, imports);
+                        }
+                    }
+                    swc_ecma_ast::PropOrSpread::Spread(spread) => {
+                        walk_expr(&spread.expr, imports);
+                    }
+                }
+            }
+        }
+        Expr::Tpl(tpl) => {
+            for expr in &tpl.exprs {
+                walk_expr(expr, imports);
+            }
+        }
+        _ => {}
+    }
+}
