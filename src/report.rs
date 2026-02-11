@@ -22,7 +22,7 @@ fn relative_path(path: &Path, root: &Path) -> String {
         .into_owned()
 }
 
-pub fn print_trace(graph: &ModuleGraph, result: &TraceResult, entry_path: &Path, root: &Path) {
+pub fn print_trace(graph: &ModuleGraph, result: &TraceResult, entry_path: &Path, root: &Path, top_modules: i32) {
     println!("{}", relative_path(entry_path, root));
     println!(
         "Static transitive weight: {} ({} modules)",
@@ -66,9 +66,13 @@ pub fn print_trace(graph: &ModuleGraph, result: &TraceResult, entry_path: &Path,
         println!();
     }
 
-    if !result.modules_by_cost.is_empty() {
+    if top_modules != 0 && !result.modules_by_cost.is_empty() {
         println!("Modules (sorted by transitive cost):");
-        let display_count = result.modules_by_cost.len().min(20);
+        let display_count = if top_modules < 0 {
+            result.modules_by_cost.len()
+        } else {
+            result.modules_by_cost.len().min(top_modules as usize)
+        };
         for mc in &result.modules_by_cost[..display_count] {
             let m = graph.module(mc.module_id);
             println!(
@@ -120,10 +124,11 @@ pub fn print_diff(diff: &DiffResult, entry_a: &str, entry_b: &str) {
         }
     }
     if !diff.shared_packages.is_empty() {
-        println!("Shared:");
-        for pkg in &diff.shared_packages {
-            println!("    {pkg}");
-        }
+        println!(
+            "Shared: {} package{}",
+            diff.shared_packages.len(),
+            if diff.shared_packages.len() == 1 { "" } else { "s" }
+        );
     }
 }
 
@@ -364,6 +369,7 @@ pub fn print_trace_json(
     result: &TraceResult,
     entry_path: &Path,
     root: &Path,
+    top_modules: i32,
 ) {
     let json = JsonTrace {
         entry: relative_path(entry_path, root),
@@ -392,17 +398,23 @@ pub fn print_trace_json(
                     .collect(),
             })
             .collect(),
-        modules_by_cost: result
-            .modules_by_cost
-            .iter()
-            .map(|mc| {
-                let m = graph.module(mc.module_id);
-                JsonModuleCost {
-                    path: relative_path(&m.path, root),
-                    transitive_size_bytes: mc.transitive_size,
-                }
-            })
-            .collect(),
+        modules_by_cost: {
+            let limit = if top_modules < 0 {
+                result.modules_by_cost.len()
+            } else {
+                result.modules_by_cost.len().min(top_modules as usize)
+            };
+            result.modules_by_cost[..limit]
+                .iter()
+                .map(|mc| {
+                    let m = graph.module(mc.module_id);
+                    JsonModuleCost {
+                        path: relative_path(&m.path, root),
+                        transitive_size_bytes: mc.transitive_size,
+                    }
+                })
+                .collect()
+        },
     };
 
     println!("{}", serde_json::to_string_pretty(&json).unwrap());

@@ -49,6 +49,10 @@ enum Commands {
         #[arg(long, default_value_t = 10)]
         top: usize,
 
+        /// Show top N modules by transitive cost (0 to hide, -1 for all)
+        #[arg(long, default_value_t = 20, allow_hyphen_values = true)]
+        top_modules: i32,
+
         /// Show all shortest import chains to a specific package
         #[arg(long)]
         chain: Option<String>,
@@ -78,6 +82,7 @@ fn main() {
             diff_from,
             include_dynamic,
             top,
+            top_modules,
             chain,
             cut,
             json,
@@ -255,9 +260,9 @@ fn main() {
 
             // Normal trace output
             if json {
-                report::print_trace_json(&graph, &result, &entry, &root);
+                report::print_trace_json(&graph, &result, &entry, &root, top_modules);
             } else {
-                report::print_trace(&graph, &result, &entry, &root);
+                report::print_trace(&graph, &result, &entry, &root, top_modules);
             }
 
             let elapsed = start.elapsed();
