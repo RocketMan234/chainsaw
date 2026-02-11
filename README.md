@@ -146,6 +146,7 @@ Options:
       --diff-from <PATH>     Compare against a previously saved snapshot
       --include-dynamic      Also traverse dynamic imports
       --top <TOP>            Show top N heaviest dependencies [default: 10]
+      --top-modules <N>      Show top N modules by transitive cost (0 to hide, -1 for all) [default: 20]
       --chain <CHAIN>        Show all shortest import chains to a specific package
       --cut <CUT>            Show where to cut to sever all chains to a package
       --json                 Output machine-readable JSON
@@ -172,6 +173,7 @@ Options:
 | `export { x } from "y"` | static | yes |
 | `require("y")` | static | yes |
 | `await import("y")` | dynamic | no |
+| `import("y").then(...)` | dynamic | no |
 | `import type { x } from "y"` | type-only | no |
 | `export type { x } from "y"` | type-only | no |
 
