@@ -49,21 +49,10 @@ Modules (sorted by transitive cost):
   ...
 ```
 
-### Find the chain to a specific package
-
-```bash
-chainsaw trace src/index.ts --chain zod
-```
-
-```
-Chain (3 hops):
-  src/index.ts -> src/config/config.ts -> src/config/zod-schema.ts -> zod
-```
-
 ### Show all import chains to a package
 
 ```bash
-chainsaw trace src/cli/program/config-guard.ts --why zod
+chainsaw trace src/cli/program/config-guard.ts --chain zod
 ```
 
 ```
@@ -72,6 +61,25 @@ chainsaw trace src/cli/program/config-guard.ts --why zod
   1. src/cli/program/config-guard.ts -> src/config/config.ts -> src/config/zod-schema.ts -> zod
   2. src/cli/program/config-guard.ts -> src/config/legacy-migrate.ts -> src/config/zod-schema.ts -> zod
   3. src/cli/program/config-guard.ts -> src/config/validation.ts -> src/config/zod-schema.ts -> zod
+```
+
+### Find where to cut
+
+```bash
+chainsaw trace src/cli/program/config-guard.ts --cut zod
+```
+
+```
+1 cut point to sever all 3 chains to "zod":
+
+  src/config/zod-schema.ts                                (breaks 3/3 chains)
+```
+
+When no single module can break all chains, chainsaw tells you:
+
+```
+No single cut point can sever all 3 chains to "chalk".
+Each chain takes a different path — multiple fixes needed.
 ```
 
 ### Compare two entry points
@@ -114,8 +122,8 @@ Options:
       --diff <DIFF>      Compare against another entry point
       --include-dynamic  Also traverse dynamic imports
       --top <TOP>        Show top N heaviest dependencies [default: 10]
-      --chain <CHAIN>    Show the full shortest chain to a specific package
-      --why <WHY>        Show ALL shortest import chains to a specific package
+      --chain <CHAIN>    Show all shortest import chains to a specific package
+      --cut <CUT>        Show where to cut to sever all chains to a package
       --json             Output machine-readable JSON
       --no-cache         Force full re-parse
   -h, --help             Print help
