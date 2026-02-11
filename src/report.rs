@@ -154,9 +154,14 @@ pub fn print_why(
     chains: &[Vec<crate::graph::ModuleId>],
     package_name: &str,
     root: &Path,
+    package_exists: bool,
 ) {
     if chains.is_empty() {
-        println!("No chains found to \"{package_name}\".");
+        if package_exists {
+            println!("Package \"{package_name}\" exists in the graph but is not reachable from this entry point.");
+        } else {
+            println!("Package \"{package_name}\" is not in the dependency graph. Check the spelling or verify it's installed.");
+        }
         return;
     }
     let hops = chains[0].len().saturating_sub(1);
@@ -189,7 +194,18 @@ pub fn print_why_json(
     chains: &[Vec<crate::graph::ModuleId>],
     package_name: &str,
     root: &Path,
+    package_exists: bool,
 ) {
+    if chains.is_empty() {
+        let json = JsonWhyEmpty {
+            package: package_name.to_string(),
+            found_in_graph: package_exists,
+            chain_count: 0,
+            chains: Vec::new(),
+        };
+        println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        return;
+    }
     let json = JsonWhy {
         package: package_name.to_string(),
         chain_count: chains.len(),
@@ -221,6 +237,14 @@ struct JsonWhy {
     package: String,
     chain_count: usize,
     hop_count: usize,
+    chains: Vec<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct JsonWhyEmpty {
+    package: String,
+    found_in_graph: bool,
+    chain_count: usize,
     chains: Vec<Vec<String>>,
 }
 

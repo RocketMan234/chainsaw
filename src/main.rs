@@ -129,11 +129,12 @@ fn main() {
 
             // Handle --why mode
             if let Some(ref package_name) = why {
+                let package_exists = graph.package_map.contains_key(package_name.as_str());
                 let chains = query::find_all_chains(&graph, entry_id, package_name);
                 if json {
-                    report::print_why_json(&graph, &chains, package_name, &root);
+                    report::print_why_json(&graph, &chains, package_name, &root, package_exists);
                 } else {
-                    report::print_why(&graph, &chains, package_name, &root);
+                    report::print_why(&graph, &chains, package_name, &root, package_exists);
                 }
                 return;
             }
