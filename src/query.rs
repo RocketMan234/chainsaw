@@ -224,6 +224,128 @@ pub fn find_chain(graph: &ModuleGraph, entry: ModuleId, package_name: &str) -> V
     shortest_chain_to_package(graph, entry, package_name)
 }
 
+/// Find ALL shortest chains from entry to a specific package.
+/// Returns up to `max_chains` distinct shortest paths (all same hop count).
+pub fn find_all_chains(
+    graph: &ModuleGraph,
+    entry: ModuleId,
+    package_name: &str,
+) -> Vec<Vec<ModuleId>> {
+    all_shortest_chains_to_package(graph, entry, package_name, 10)
+}
+
+/// BFS with multi-parent tracking to find all shortest paths to a package.
+fn all_shortest_chains_to_package(
+    graph: &ModuleGraph,
+    entry: ModuleId,
+    package_name: &str,
+    max_chains: usize,
+) -> Vec<Vec<ModuleId>> {
+    let mut parents: HashMap<ModuleId, Vec<ModuleId>> = HashMap::new();
+    let mut depth: HashMap<ModuleId, u32> = HashMap::new();
+    let mut queue: VecDeque<ModuleId> = VecDeque::new();
+
+    depth.insert(entry, 0);
+    queue.push_back(entry);
+
+    let mut target_depth: Option<u32> = None;
+    let mut targets: Vec<ModuleId> = Vec::new();
+
+    while let Some(mid) = queue.pop_front() {
+        let d = depth[&mid];
+
+        // If we've found targets and moved past their depth, stop
+        if let Some(td) = target_depth {
+            if d > td {
+                break;
+            }
+        }
+
+        // Check if this module is in the target package
+        let module = graph.module(mid);
+        if module.package.as_deref() == Some(package_name) {
+            if target_depth.is_none() {
+                target_depth = Some(d);
+            }
+            targets.push(mid);
+            continue; // Don't expand past target package modules
+        }
+
+        for &edge_id in graph.outgoing_edges(mid) {
+            let edge = graph.edge(edge_id);
+            if edge.kind != EdgeKind::Static {
+                continue;
+            }
+
+            let next_depth = d + 1;
+            match depth.get(&edge.to) {
+                Some(&existing) if existing == next_depth => {
+                    // Same depth -- add as alternate parent
+                    parents.entry(edge.to).or_default().push(mid);
+                }
+                None => {
+                    // First visit
+                    depth.insert(edge.to, next_depth);
+                    parents.entry(edge.to).or_default().push(mid);
+                    queue.push_back(edge.to);
+                }
+                _ => {} // Already visited at shorter depth, skip
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        return Vec::new();
+    }
+
+    // Backtrack from each target to reconstruct all paths
+    let mut all_chains: Vec<Vec<ModuleId>> = Vec::new();
+    for &target in &targets {
+        let mut partial_paths: Vec<Vec<ModuleId>> = vec![vec![target]];
+
+        loop {
+            let mut next_partial: Vec<Vec<ModuleId>> = Vec::new();
+            let mut any_extended = false;
+
+            for path in &partial_paths {
+                let &head = path.last().unwrap();
+                if head == entry {
+                    next_partial.push(path.clone());
+                    continue;
+                }
+                if let Some(pars) = parents.get(&head) {
+                    any_extended = true;
+                    for &p in pars {
+                        let mut new_path = path.clone();
+                        new_path.push(p);
+                        next_partial.push(new_path);
+                        if next_partial.len() > max_chains * 2 {
+                            break; // Prevent combinatorial explosion
+                        }
+                    }
+                }
+            }
+
+            partial_paths = next_partial;
+            if !any_extended || partial_paths.len() > max_chains * 2 {
+                break;
+            }
+        }
+
+        for mut path in partial_paths {
+            path.reverse();
+            if path.first() == Some(&entry) {
+                all_chains.push(path);
+                if all_chains.len() >= max_chains {
+                    return all_chains;
+                }
+            }
+        }
+    }
+
+    all_chains
+}
+
 /// Compute a diff between two trace results.
 pub struct DiffResult {
     pub entry_a_weight: u64,

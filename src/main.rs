@@ -45,6 +45,10 @@ enum Commands {
         #[arg(long)]
         chain: Option<String>,
 
+        /// Show ALL shortest import chains to a specific package
+        #[arg(long)]
+        why: Option<String>,
+
         /// Output machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -65,6 +69,7 @@ fn main() {
             include_dynamic,
             top,
             chain,
+            why,
             json,
             no_cache,
             ..
@@ -121,6 +126,17 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+
+            // Handle --why mode
+            if let Some(ref package_name) = why {
+                let chains = query::find_all_chains(&graph, entry_id, package_name);
+                if json {
+                    report::print_why_json(&graph, &chains, package_name, &root);
+                } else {
+                    report::print_why(&graph, &chains, package_name, &root);
+                }
+                return;
+            }
 
             // Handle --chain mode
             if let Some(ref package_name) = chain {

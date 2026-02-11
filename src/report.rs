@@ -149,7 +149,80 @@ pub fn print_diff(diff: &DiffResult, entry_a: &str, entry_b: &str) {
     }
 }
 
+pub fn print_why(
+    graph: &ModuleGraph,
+    chains: &[Vec<crate::graph::ModuleId>],
+    package_name: &str,
+    root: &Path,
+) {
+    if chains.is_empty() {
+        println!("No chains found to \"{package_name}\".");
+        return;
+    }
+    let hops = chains[0].len().saturating_sub(1);
+    println!(
+        "{} chain{} to \"{}\" ({} hop{}):\n",
+        chains.len(),
+        if chains.len() == 1 { "" } else { "s" },
+        package_name,
+        hops,
+        if hops == 1 { "" } else { "s" },
+    );
+    for (i, chain) in chains.iter().enumerate() {
+        let chain_str: Vec<String> = chain
+            .iter()
+            .map(|&mid| {
+                let m = graph.module(mid);
+                if let Some(ref pkg) = m.package {
+                    pkg.clone()
+                } else {
+                    relative_path(&m.path, root)
+                }
+            })
+            .collect();
+        println!("  {}. {}", i + 1, chain_str.join(" -> "));
+    }
+}
+
+pub fn print_why_json(
+    graph: &ModuleGraph,
+    chains: &[Vec<crate::graph::ModuleId>],
+    package_name: &str,
+    root: &Path,
+) {
+    let json = JsonWhy {
+        package: package_name.to_string(),
+        chain_count: chains.len(),
+        hop_count: chains.first().map(|c| c.len().saturating_sub(1)).unwrap_or(0),
+        chains: chains
+            .iter()
+            .map(|chain| {
+                chain
+                    .iter()
+                    .map(|&mid| {
+                        let m = graph.module(mid);
+                        if let Some(ref pkg) = m.package {
+                            pkg.clone()
+                        } else {
+                            relative_path(&m.path, root)
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+    };
+    println!("{}", serde_json::to_string_pretty(&json).unwrap());
+}
+
 // JSON output types
+
+#[derive(Serialize)]
+struct JsonWhy {
+    package: String,
+    chain_count: usize,
+    hop_count: usize,
+    chains: Vec<Vec<String>>,
+}
 
 #[derive(Serialize)]
 struct JsonTrace {
