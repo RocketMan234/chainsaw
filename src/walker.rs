@@ -177,6 +177,114 @@ pub fn build_graph(root: &Path) -> ModuleGraph {
     g
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn setup_workspace(tmp: &Path) {
+        // Project root: tmp/packages/app (has package.json with name "my-app")
+        // Workspace sibling: tmp/packages/lib (has package.json with name "@my/lib")
+        let app = tmp.join("packages/app");
+        let lib = tmp.join("packages/lib/src");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(
+            app.join("package.json"),
+            r#"{"name": "my-app"}"#,
+        ).unwrap();
+        fs::write(
+            tmp.join("packages/lib/package.json"),
+            r#"{"name": "@my/lib"}"#,
+        ).unwrap();
+        fs::write(lib.join("index.ts"), "export const x = 1;").unwrap();
+    }
+
+    #[test]
+    fn read_package_name_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"name": "@scope/pkg", "version": "1.0.0"}"#,
+        ).unwrap();
+        assert_eq!(
+            read_package_name(&tmp.path().join("package.json")),
+            Some("@scope/pkg".to_string())
+        );
+    }
+
+    #[test]
+    fn read_package_name_missing_name_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("package.json"),
+            r#"{"version": "1.0.0"}"#,
+        ).unwrap();
+        assert_eq!(read_package_name(&tmp.path().join("package.json")), None);
+    }
+
+    #[test]
+    fn read_package_name_nonexistent_file() {
+        assert_eq!(read_package_name(Path::new("/nonexistent/package.json")), None);
+    }
+
+    #[test]
+    fn workspace_cache_detects_sibling_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let project_root = tmp.path().join("packages/app");
+        let mut cache = WorkspacePackageCache::new(&project_root);
+
+        // File in workspace sibling should resolve to package name
+        let sibling_file = tmp.path().join("packages/lib/src/index.ts");
+        assert_eq!(cache.lookup(&sibling_file), Some("@my/lib".to_string()));
+    }
+
+    #[test]
+    fn workspace_cache_skips_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let project_root = tmp.path().join("packages/app");
+        let mut cache = WorkspacePackageCache::new(&project_root);
+
+        // File in project root should NOT get a package name
+        let own_file = project_root.join("src/cli.ts");
+        assert_eq!(cache.lookup(&own_file), None);
+    }
+
+    #[test]
+    fn workspace_cache_caches_lookups() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let project_root = tmp.path().join("packages/app");
+        let mut cache = WorkspacePackageCache::new(&project_root);
+
+        let file1 = tmp.path().join("packages/lib/src/index.ts");
+        let file2 = tmp.path().join("packages/lib/src/utils.ts");
+
+        // First lookup populates cache
+        assert_eq!(cache.lookup(&file1), Some("@my/lib".to_string()));
+        // Second lookup for same package should hit cache
+        assert_eq!(cache.lookup(&file2), Some("@my/lib".to_string()));
+        // Verify cache was populated
+        assert!(cache.cache.contains_key(&tmp.path().join("packages/lib")));
+    }
+
+    #[test]
+    fn workspace_cache_no_package_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("some/random/dir");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("file.ts"), "").unwrap();
+
+        let mut cache = WorkspacePackageCache::new(tmp.path());
+        assert_eq!(cache.lookup(&dir.join("file.ts")), None);
+    }
+}
+
 /// Compute aggregated package info (total reachable size + file count).
 /// For each package, BFS from its entry module following only edges within the same package.
 fn compute_package_info(graph: &mut ModuleGraph) {
