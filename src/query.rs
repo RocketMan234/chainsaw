@@ -509,3 +509,254 @@ pub fn diff_snapshots(a: &TraceSnapshot, b: &TraceSnapshot) -> DiffResult {
             .collect(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::ModuleGraph;
+    use std::path::PathBuf;
+
+    /// Build a small graph from declarative specs.
+    /// `nodes`: (path, size_bytes, package_name)
+    /// `edges`: (from_index, to_index, kind)
+    fn make_graph(
+        nodes: &[(&str, u64, Option<&str>)],
+        edges: &[(usize, usize, EdgeKind)],
+    ) -> ModuleGraph {
+        let mut graph = ModuleGraph::new();
+        for &(path, size, pkg) in nodes {
+            graph.add_module(
+                PathBuf::from(path),
+                size,
+                pkg.map(|s| s.to_string()),
+            );
+        }
+        for &(from, to, kind) in edges {
+            graph.add_edge(
+                ModuleId(from as u32),
+                ModuleId(to as u32),
+                kind,
+                String::new(),
+            );
+        }
+        graph
+    }
+
+    // --- BFS / trace ---
+
+    #[test]
+    fn trace_static_weight() {
+        // A(100) -> B(200) -> C(300)
+        let graph = make_graph(
+            &[("a.ts", 100, None), ("b.ts", 200, None), ("c.ts", 300, None)],
+            &[(0, 1, EdgeKind::Static), (1, 2, EdgeKind::Static)],
+        );
+        let result = trace(&graph, ModuleId(0), &TraceOptions::default());
+        assert_eq!(result.static_weight, 600);
+        assert_eq!(result.static_module_count, 3);
+    }
+
+    #[test]
+    fn trace_dynamic_excluded_by_default() {
+        // A(100) -static-> B(200), A -dynamic-> C(300)
+        let graph = make_graph(
+            &[("a.ts", 100, None), ("b.ts", 200, None), ("c.ts", 300, None)],
+            &[(0, 1, EdgeKind::Static), (0, 2, EdgeKind::Dynamic)],
+        );
+        let result = trace(&graph, ModuleId(0), &TraceOptions::default());
+        assert_eq!(result.static_weight, 300); // A + B only
+        assert_eq!(result.dynamic_only_weight, 300); // C
+        assert_eq!(result.dynamic_only_module_count, 1);
+    }
+
+    #[test]
+    fn trace_include_dynamic() {
+        // A(100) -dynamic-> B(200)
+        let graph = make_graph(
+            &[("a.ts", 100, None), ("b.ts", 200, None)],
+            &[(0, 1, EdgeKind::Dynamic)],
+        );
+        let opts = TraceOptions {
+            include_dynamic: true,
+            top_n: 10,
+        };
+        let result = trace(&graph, ModuleId(0), &opts);
+        // B should appear in modules_by_cost when include_dynamic is set
+        assert!(result.modules_by_cost.iter().any(|m| m.module_id == ModuleId(1)));
+    }
+
+    // --- Chain finding ---
+
+    #[test]
+    fn chain_linear_path() {
+        // A -> B -> C -> zod
+        let graph = make_graph(
+            &[
+                ("a.ts", 100, None),
+                ("b.ts", 100, None),
+                ("c.ts", 100, None),
+                ("node_modules/zod/index.js", 500, Some("zod")),
+            ],
+            &[
+                (0, 1, EdgeKind::Static),
+                (1, 2, EdgeKind::Static),
+                (2, 3, EdgeKind::Static),
+            ],
+        );
+        let chains = find_all_chains(&graph, ModuleId(0), "zod");
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0], vec![ModuleId(0), ModuleId(1), ModuleId(2), ModuleId(3)]);
+    }
+
+    #[test]
+    fn chain_dedup_same_package_path() {
+        // Two paths to zod that differ only by internal zod file:
+        // A -> B -> zod/index.js
+        // A -> B -> zod/lib.js
+        // These should dedup to one chain at the package level.
+        let graph = make_graph(
+            &[
+                ("a.ts", 100, None),
+                ("b.ts", 100, None),
+                ("node_modules/zod/index.js", 250, Some("zod")),
+                ("node_modules/zod/lib.js", 250, Some("zod")),
+            ],
+            &[
+                (0, 1, EdgeKind::Static),
+                (1, 2, EdgeKind::Static),
+                (1, 3, EdgeKind::Static),
+            ],
+        );
+        let chains = find_all_chains(&graph, ModuleId(0), "zod");
+        assert_eq!(chains.len(), 1);
+    }
+
+    #[test]
+    fn chain_not_reachable() {
+        // A -> B, no path to zod
+        let graph = make_graph(
+            &[
+                ("a.ts", 100, None),
+                ("b.ts", 100, None),
+                ("node_modules/zod/index.js", 500, Some("zod")),
+            ],
+            &[(0, 1, EdgeKind::Static)],
+        );
+        let chains = find_all_chains(&graph, ModuleId(0), "zod");
+        assert!(chains.is_empty());
+    }
+
+    // --- Cut points ---
+
+    #[test]
+    fn cut_single_convergence_point() {
+        // Diamond: A -> B -> D -> zod
+        //          A -> C -> D -> zod
+        // D is the cut point (appears in all chains)
+        let graph = make_graph(
+            &[
+                ("a.ts", 100, None),
+                ("b.ts", 100, None),
+                ("c.ts", 100, None),
+                ("d.ts", 100, None),
+                ("node_modules/zod/index.js", 500, Some("zod")),
+            ],
+            &[
+                (0, 1, EdgeKind::Static),
+                (0, 2, EdgeKind::Static),
+                (1, 3, EdgeKind::Static),
+                (2, 3, EdgeKind::Static),
+                (3, 4, EdgeKind::Static),
+            ],
+        );
+        let chains = find_all_chains(&graph, ModuleId(0), "zod");
+        assert_eq!(chains.len(), 2);
+
+        let cuts = find_cut_modules(&graph, &chains, ModuleId(0), "zod", 10);
+        assert!(!cuts.is_empty());
+        assert!(cuts.iter().any(|c| c.module_id == ModuleId(3)));
+    }
+
+    #[test]
+    fn cut_no_convergence_point() {
+        // Two independent paths:
+        // A -> B -> zod1
+        // A -> C -> zod2
+        // No module (other than A and zod) appears in all chains.
+        let graph = make_graph(
+            &[
+                ("a.ts", 100, None),
+                ("b.ts", 100, None),
+                ("c.ts", 100, None),
+                ("node_modules/zod/index.js", 250, Some("zod")),
+                ("node_modules/zod/lib.js", 250, Some("zod")),
+            ],
+            &[
+                (0, 1, EdgeKind::Static),
+                (0, 2, EdgeKind::Static),
+                (1, 3, EdgeKind::Static),
+                (2, 4, EdgeKind::Static),
+            ],
+        );
+        let chains = find_all_chains(&graph, ModuleId(0), "zod");
+        let cuts = find_cut_modules(&graph, &chains, ModuleId(0), "zod", 10);
+        assert!(cuts.is_empty());
+    }
+
+    #[test]
+    fn cut_single_chain_ascending_sort() {
+        // Single chain: A -> B(big) -> C(small) -> zod
+        // With single chain, cuts should sort ascending (surgical first).
+        let graph = make_graph(
+            &[
+                ("a.ts", 100, None),
+                ("b.ts", 5000, None),
+                ("c.ts", 100, None),
+                ("node_modules/zod/index.js", 500, Some("zod")),
+            ],
+            &[
+                (0, 1, EdgeKind::Static),
+                (1, 2, EdgeKind::Static),
+                (2, 3, EdgeKind::Static),
+            ],
+        );
+        let chains = find_all_chains(&graph, ModuleId(0), "zod");
+        assert_eq!(chains.len(), 1);
+
+        let cuts = find_cut_modules(&graph, &chains, ModuleId(0), "zod", 10);
+        assert!(cuts.len() >= 2);
+        // First cut should have smaller transitive_size (more surgical)
+        assert!(cuts[0].transitive_size <= cuts[1].transitive_size);
+    }
+
+    // --- Diff ---
+
+    #[test]
+    fn diff_snapshots_computes_sets() {
+        let a = TraceSnapshot {
+            static_weight: 1000,
+            all_packages: ["zod", "chalk", "tslog"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        };
+        let b = TraceSnapshot {
+            static_weight: 800,
+            all_packages: ["chalk", "tslog", "ajv"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        };
+        let diff = diff_snapshots(&a, &b);
+
+        assert_eq!(diff.entry_a_weight, 1000);
+        assert_eq!(diff.entry_b_weight, 800);
+        assert_eq!(diff.weight_delta, -200);
+        assert!(diff.only_in_a.contains(&"zod".to_string()));
+        assert!(diff.only_in_b.contains(&"ajv".to_string()));
+        assert!(diff.shared_packages.contains(&"chalk".to_string()));
+        assert!(diff.shared_packages.contains(&"tslog".to_string()));
+        assert!(!diff.shared_packages.contains(&"zod".to_string()));
+        assert!(!diff.shared_packages.contains(&"ajv".to_string()));
+    }
+}
