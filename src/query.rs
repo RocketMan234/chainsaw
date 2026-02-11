@@ -1,0 +1,266 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use crate::graph::{EdgeKind, ModuleGraph, ModuleId};
+
+pub struct TraceResult {
+    /// Total file size reachable via static imports
+    pub static_weight: u64,
+    /// Number of modules reachable via static imports
+    pub static_module_count: usize,
+    /// Total file size reachable only via dynamic imports (not already counted in static)
+    pub dynamic_only_weight: u64,
+    /// Number of modules reachable only via dynamic imports
+    pub dynamic_only_module_count: usize,
+    /// Heavy packages found via static imports, sorted by total reachable size descending
+    pub heavy_packages: Vec<HeavyPackage>,
+    /// All reachable modules with their transitive cost, sorted descending
+    pub modules_by_cost: Vec<ModuleCost>,
+}
+
+pub struct HeavyPackage {
+    pub name: String,
+    pub total_size: u64,
+    pub file_count: u32,
+    /// Shortest chain from entry point to the first module in this package
+    pub chain: Vec<ModuleId>,
+}
+
+pub struct ModuleCost {
+    pub module_id: ModuleId,
+    pub transitive_size: u64,
+}
+
+pub struct TraceOptions {
+    pub include_dynamic: bool,
+    pub top_n: usize,
+}
+
+impl Default for TraceOptions {
+    fn default() -> Self {
+        Self {
+            include_dynamic: false,
+            top_n: 10,
+        }
+    }
+}
+
+/// BFS from entry point, collecting all reachable modules.
+/// Returns (static_reachable, dynamic_only_reachable) as sets of ModuleIds.
+fn bfs_reachable(
+    graph: &ModuleGraph,
+    entry: ModuleId,
+) -> (HashSet<ModuleId>, HashSet<ModuleId>) {
+    let mut static_visited: HashSet<ModuleId> = HashSet::new();
+    let mut static_queue: VecDeque<ModuleId> = VecDeque::new();
+
+    static_visited.insert(entry);
+    static_queue.push_back(entry);
+
+    // BFS following static edges
+    while let Some(mid) = static_queue.pop_front() {
+        for &edge_id in graph.outgoing_edges(mid) {
+            let edge = graph.edge(edge_id);
+            if edge.kind == EdgeKind::Static && static_visited.insert(edge.to) {
+                static_queue.push_back(edge.to);
+            }
+        }
+    }
+
+    // BFS following dynamic edges from all statically reachable modules
+    let mut dynamic_only: HashSet<ModuleId> = HashSet::new();
+    let mut dyn_queue: VecDeque<ModuleId> = VecDeque::new();
+
+    for &mid in &static_visited {
+        for &edge_id in graph.outgoing_edges(mid) {
+            let edge = graph.edge(edge_id);
+            if edge.kind == EdgeKind::Dynamic
+                && !static_visited.contains(&edge.to)
+                && dynamic_only.insert(edge.to)
+            {
+                dyn_queue.push_back(edge.to);
+            }
+        }
+    }
+
+    // Continue BFS from dynamic-only modules (they may have static imports of their own)
+    while let Some(mid) = dyn_queue.pop_front() {
+        for &edge_id in graph.outgoing_edges(mid) {
+            let edge = graph.edge(edge_id);
+            if (edge.kind == EdgeKind::Static || edge.kind == EdgeKind::Dynamic)
+                && !static_visited.contains(&edge.to)
+                && dynamic_only.insert(edge.to)
+            {
+                dyn_queue.push_back(edge.to);
+            }
+        }
+    }
+
+    (static_visited, dynamic_only)
+}
+
+/// BFS shortest path from entry to any module in the target package.
+fn shortest_chain_to_package(
+    graph: &ModuleGraph,
+    entry: ModuleId,
+    package_name: &str,
+) -> Vec<ModuleId> {
+    let mut visited: HashSet<ModuleId> = HashSet::new();
+    let mut parent: HashMap<ModuleId, ModuleId> = HashMap::new();
+    let mut queue: VecDeque<ModuleId> = VecDeque::new();
+
+    visited.insert(entry);
+    queue.push_back(entry);
+
+    while let Some(mid) = queue.pop_front() {
+        let module = graph.module(mid);
+        if module.package.as_deref() == Some(package_name) {
+            // Reconstruct path
+            let mut chain = vec![mid];
+            let mut current = mid;
+            while let Some(&p) = parent.get(&current) {
+                chain.push(p);
+                current = p;
+            }
+            chain.reverse();
+            return chain;
+        }
+
+        for &edge_id in graph.outgoing_edges(mid) {
+            let edge = graph.edge(edge_id);
+            if edge.kind == EdgeKind::Static && visited.insert(edge.to) {
+                parent.insert(edge.to, mid);
+                queue.push_back(edge.to);
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+/// Compute the transitive cost of a module: total size of all modules
+/// reachable from it via static imports.
+fn transitive_cost(graph: &ModuleGraph, start: ModuleId) -> u64 {
+    let mut visited: HashSet<ModuleId> = HashSet::new();
+    let mut queue: VecDeque<ModuleId> = VecDeque::new();
+    let mut total: u64 = 0;
+
+    visited.insert(start);
+    queue.push_back(start);
+
+    while let Some(mid) = queue.pop_front() {
+        total += graph.module(mid).size_bytes;
+        for &edge_id in graph.outgoing_edges(mid) {
+            let edge = graph.edge(edge_id);
+            if edge.kind == EdgeKind::Static && visited.insert(edge.to) {
+                queue.push_back(edge.to);
+            }
+        }
+    }
+
+    total
+}
+
+pub fn trace(graph: &ModuleGraph, entry: ModuleId, opts: &TraceOptions) -> TraceResult {
+    let (static_reachable, dynamic_only) = bfs_reachable(graph, entry);
+
+    let static_weight: u64 = static_reachable
+        .iter()
+        .map(|&mid| graph.module(mid).size_bytes)
+        .sum();
+    let dynamic_only_weight: u64 = dynamic_only
+        .iter()
+        .map(|&mid| graph.module(mid).size_bytes)
+        .sum();
+
+    // Find heavy packages in the static reachable set
+    let mut package_sizes: HashMap<String, (u64, u32)> = HashMap::new();
+    for &mid in &static_reachable {
+        let module = graph.module(mid);
+        if let Some(ref pkg) = module.package {
+            let entry = package_sizes.entry(pkg.clone()).or_default();
+            entry.0 += module.size_bytes;
+            entry.1 += 1;
+        }
+    }
+
+    let mut heavy_packages: Vec<HeavyPackage> = package_sizes
+        .into_iter()
+        .map(|(name, (total_size, file_count))| {
+            let chain = shortest_chain_to_package(graph, entry, &name);
+            HeavyPackage {
+                name,
+                total_size,
+                file_count,
+                chain,
+            }
+        })
+        .collect();
+    heavy_packages.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+    heavy_packages.truncate(opts.top_n);
+
+    // Compute transitive cost for all statically reachable source modules
+    let mut modules_by_cost: Vec<ModuleCost> = static_reachable
+        .iter()
+        .filter(|&&mid| graph.module(mid).package.is_none()) // Only source files
+        .map(|&mid| ModuleCost {
+            module_id: mid,
+            transitive_size: transitive_cost(graph, mid),
+        })
+        .collect();
+    modules_by_cost.sort_by(|a, b| b.transitive_size.cmp(&a.transitive_size));
+
+    TraceResult {
+        static_weight,
+        static_module_count: static_reachable.len(),
+        dynamic_only_weight,
+        dynamic_only_module_count: dynamic_only.len(),
+        heavy_packages,
+        modules_by_cost,
+    }
+}
+
+/// Find the shortest chain from entry to a specific package.
+pub fn find_chain(graph: &ModuleGraph, entry: ModuleId, package_name: &str) -> Vec<ModuleId> {
+    shortest_chain_to_package(graph, entry, package_name)
+}
+
+/// Compute a diff between two trace results.
+pub struct DiffResult {
+    pub entry_a_weight: u64,
+    pub entry_b_weight: u64,
+    pub weight_delta: i64,
+    pub shared_packages: Vec<String>,
+    pub only_in_a: Vec<String>,
+    pub only_in_b: Vec<String>,
+}
+
+pub fn diff_traces(a: &TraceResult, b: &TraceResult) -> DiffResult {
+    let pkgs_a: HashSet<&str> = a
+        .heavy_packages
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    let pkgs_b: HashSet<&str> = b
+        .heavy_packages
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+
+    DiffResult {
+        entry_a_weight: a.static_weight,
+        entry_b_weight: b.static_weight,
+        weight_delta: b.static_weight as i64 - a.static_weight as i64,
+        shared_packages: pkgs_a
+            .intersection(&pkgs_b)
+            .map(|s| s.to_string())
+            .collect(),
+        only_in_a: pkgs_a
+            .difference(&pkgs_b)
+            .map(|s| s.to_string())
+            .collect(),
+        only_in_b: pkgs_b
+            .difference(&pkgs_a)
+            .map(|s| s.to_string())
+            .collect(),
+    }
+}
