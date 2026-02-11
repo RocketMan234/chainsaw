@@ -82,6 +82,28 @@ No single cut point can sever all 3 chains to "chalk".
 Each chain takes a different path — multiple fixes needed.
 ```
 
+### Before/after comparison
+
+```bash
+chainsaw trace src/cli/program/config-guard.ts --save before.json
+# ... make changes ...
+chainsaw trace src/cli/program/config-guard.ts --diff-from before.json
+```
+
+```
+Diff: before.json vs src/cli/program/config-guard.ts
+
+  before.json                              1.3 MB
+  src/cli/program/config-guard.ts          1.1 MB
+  Delta                                    -200 KB
+
+Removed since before.json:
+  - zod
+Shared:
+    chalk
+    tslog
+```
+
 ### Compare two entry points
 
 ```bash
@@ -119,13 +141,15 @@ Arguments:
   <ENTRY>  Entry point file to trace from
 
 Options:
-      --diff <DIFF>      Compare against another entry point
-      --include-dynamic  Also traverse dynamic imports
-      --top <TOP>        Show top N heaviest dependencies [default: 10]
-      --chain <CHAIN>    Show all shortest import chains to a specific package
-      --cut <CUT>        Show where to cut to sever all chains to a package
-      --json             Output machine-readable JSON
-      --no-cache         Force full re-parse
+      --diff <DIFF>          Compare against another entry point
+      --save <PATH>          Save a trace snapshot for later comparison
+      --diff-from <PATH>     Compare against a previously saved snapshot
+      --include-dynamic      Also traverse dynamic imports
+      --top <TOP>            Show top N heaviest dependencies [default: 10]
+      --chain <CHAIN>        Show all shortest import chains to a specific package
+      --cut <CUT>            Show where to cut to sever all chains to a package
+      --json                 Output machine-readable JSON
+      --no-cache             Force full re-parse
   -h, --help             Print help
 ```
 
